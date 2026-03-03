@@ -736,3 +736,4 @@ export function validatePhone(phone: string): boolean {
   const phoneRegex = /^[679][0-9]{8}$/;
   return phoneRegex.test(phone.replace(/\s/g, ''));
 }
+
