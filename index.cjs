@@ -1,4 +1,5 @@
-// @ts-self-types="./index.d.ts"
+'use strict';
+
 /**
  * @fileoverview Merge Strategy
  */
@@ -449,4 +450,6 @@ class ObjectSchema {
 	}
 }
 
-export { MergeStrategy, ObjectSchema, ValidationStrategy };
+exports.MergeStrategy = MergeStrategy;
+exports.ObjectSchema = ObjectSchema;
+exports.ValidationStrategy = ValidationStrategy;
