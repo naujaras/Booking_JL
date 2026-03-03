@@ -1,223 +1,252 @@
-# ObjectSchema Package
+# ESLint Plugin Kit
 
-## Overview
+## Description
 
-A JavaScript object merge/validation utility where you can define a different merge and validation strategy for each key. This is helpful when you need to validate complex data structures and then merge them in a way that is more complex than `Object.assign()`. This is used in the [`@eslint/config-array`](https://npmjs.com/package/@eslint/config-array) package but can also be used on its own.
+A collection of utilities to help build ESLint plugins.
 
 ## Installation
 
 For Node.js and compatible runtimes:
 
 ```shell
-npm install @eslint/object-schema
+npm install @eslint/plugin-kit
 # or
-yarn add @eslint/object-schema
+yarn add @eslint/plugin-kit
 # or
-pnpm install @eslint/object-schema
+pnpm install @eslint/plugin-kit
 # or
-bun install @eslint/object-schema
+bun add @eslint/plugin-kit
 ```
 
 For Deno:
 
 ```shell
-deno add @eslint/object-schema
+deno add @eslint/plugin-kit
 ```
 
 ## Usage
 
-Import the `ObjectSchema` constructor:
+This package exports the following utilities:
+
+- [`ConfigCommentParser`](#configcommentparser) - used to parse ESLint configuration comments (i.e., `/* eslint-disable rule */`)
+- [`VisitNodeStep` and `CallMethodStep`](#visitnodestep-and-callmethodstep) - used to help implement `SourceCode#traverse()`
+- [`Directive`](#directive) - used to help implement `SourceCode#getDisableDirectives()`
+- [`TextSourceCodeBase`](#textsourcecodebase) - base class to help implement the `SourceCode` interface
+
+### `ConfigCommentParser`
+
+To use the `ConfigCommentParser` class, import it from the package and create a new instance, such as:
 
 ```js
-// using ESM
-import { ObjectSchema } from "@eslint/object-schema";
+import { ConfigCommentParser } from "@eslint/plugin-kit";
 
-// using CommonJS
-const { ObjectSchema } = require("@eslint/object-schema");
+// create a new instance
+const commentParser = new ConfigCommentParser();
 
-const schema = new ObjectSchema({
-	// define a definition for the "downloads" key
-	downloads: {
-		required: true,
-		merge(value1, value2) {
-			return value1 + value2;
-		},
-		validate(value) {
-			if (typeof value !== "number") {
-				throw new Error("Expected downloads to be a number.");
-			}
-		},
-	},
+// pass in a comment string without the comment delimiters
+const directive = commentParser.parseDirective(
+	"eslint-disable prefer-const, semi -- I don't want to use these.",
+);
 
-	// define a strategy for the "versions" key
-	version: {
-		required: true,
-		merge(value1, value2) {
-			return value1.concat(value2);
-		},
-		validate(value) {
-			if (!Array.isArray(value)) {
-				throw new Error("Expected versions to be an array.");
-			}
-		},
-	},
-});
-
-const record1 = {
-	downloads: 25,
-	versions: ["v1.0.0", "v1.1.0", "v1.2.0"],
-};
-
-const record2 = {
-	downloads: 125,
-	versions: ["v2.0.0", "v2.1.0", "v3.0.0"],
-};
-
-// make sure the records are valid
-schema.validate(record1);
-schema.validate(record2);
-
-// merge together (schema.merge() accepts any number of objects)
-const result = schema.merge(record1, record2);
-
-// result looks like this:
-
-const result = {
-	downloads: 75,
-	versions: ["v1.0.0", "v1.1.0", "v1.2.0", "v2.0.0", "v2.1.0", "v3.0.0"],
-};
+// will be undefined when a directive can't be parsed
+if (directive) {
+	console.log(directive.label); // "eslint-disable"
+	console.log(directive.value); // "prefer-const, semi"
+	console.log(directive.justification); // "I don't want to use these."
+}
 ```
 
-## Tips and Tricks
+There are different styles of directive values that you'll need to parse separately to get the correct format:
 
-### Named merge strategies
+```js
+import { ConfigCommentParser } from "@eslint/plugin-kit";
 
-Instead of specifying a `merge()` method, you can specify one of the following strings to use a default merge strategy:
+// create a new instance
+const commentParser = new ConfigCommentParser();
 
-- `"assign"` - use `Object.assign()` to merge the two values into one object.
-- `"overwrite"` - the second value always replaces the first.
-- `"replace"` - the second value replaces the first if the second is not `undefined`.
+// list format
+const list = commentParser.parseListConfig("prefer-const, semi");
+console.log(Object.entries(list)); // [["prefer-const", true], ["semi", true]]
+
+// string format
+const strings = commentParser.parseStringConfig("foo:off, bar");
+console.log(Object.entries(strings)); // [["foo", "off"], ["bar", null]]
+
+// JSON-like config format
+const jsonLike = commentParser.parseJSONLikeConfig(
+	"semi:[error, never], prefer-const: warn",
+);
+console.log(Object.entries(jsonLike.config)); // [["semi", ["error", "never"]], ["prefer-const", "warn"]]
+```
+
+### `VisitNodeStep` and `CallMethodStep`
+
+The `VisitNodeStep` and `CallMethodStep` classes represent steps in the traversal of source code. They implement the correct interfaces to return from the `SourceCode#traverse()` method.
+
+The `VisitNodeStep` class is the more common of the two, where you are describing a visit to a particular node during the traversal. The constructor accepts three arguments:
+
+- `target` - the node being visited. This is used to determine the method to call inside of a rule. For instance, if the node's type is `Literal` then ESLint will call a method named `Literal()` on the rule (if present).
+- `phase` - either 1 for enter or 2 for exit.
+- `args` - an array of arguments to pass into the visitor method of a rule.
 
 For example:
 
 ```js
-const schema = new ObjectSchema({
-	name: {
-		merge: "replace",
-		validate() {},
-	},
-});
+import { VisitNodeStep } from "@eslint/plugin-kit";
+
+class MySourceCode {
+	traverse() {
+		const steps = [];
+
+		for (const { node, parent, phase } of iterator(this.ast)) {
+			steps.push(
+				new VisitNodeStep({
+					target: node,
+					phase: phase === "enter" ? 1 : 2,
+					args: [node, parent],
+				}),
+			);
+		}
+
+		return steps;
+	}
+}
 ```
 
-### Named validation strategies
+The `CallMethodStep` class is less common and is used to tell ESLint to call a specific method on the rule. The constructor accepts two arguments:
 
-Instead of specifying a `validate()` method, you can specify one of the following strings to use a default validation strategy:
-
-- `"array"` - value must be an array.
-- `"boolean"` - value must be a boolean.
-- `"number"` - value must be a number.
-- `"object"` - value must be an object.
-- `"object?"` - value must be an object or null.
-- `"string"` - value must be a string.
-- `"string!"` - value must be a non-empty string.
+- `target` - the name of the method to call, frequently beginning with `"on"` such as `"onCodePathStart"`.
+- `args` - an array of arguments to pass to the method.
 
 For example:
 
 ```js
-const schema = new ObjectSchema({
-	name: {
-		merge: "replace",
-		validate: "string",
-	},
-});
+import { VisitNodeStep, CallMethodStep } from "@eslint/plugin-kit";
+
+class MySourceCode {
+    traverse() {
+        const steps = [];
+
+        for (const { node, parent, phase } of iterator(this.ast)) {
+            steps.push(
+                new VisitNodeStep({
+                    target: node,
+                    phase: phase === "enter" ? 1 : 2,
+                    args: [node, parent],
+                }),
+            );
+
+            // call a method indicating how many times we've been through the loop
+            steps.push(
+                new CallMethodStep({
+                    target: "onIteration",
+                    args: [steps.length]
+                });
+            )
+        }
+
+        return steps;
+    }
+}
 ```
 
-### Subschemas
+### `Directive`
 
-If you are defining a key that is, itself, an object, you can simplify the process by using a subschema. Instead of defining `merge()` and `validate()`, assign a `schema` key that contains a schema definition, like this:
+The `Directive` class represents a disable directive in the source code and implements the `Directive` interface from `@eslint/core`. You can tell ESLint about disable directives using the `SourceCode#getDisableDirectives()` method, where part of the return value is an array of `Directive` objects. Here's an example:
 
 ```js
-const schema = new ObjectSchema({
-	name: {
-		schema: {
-			first: {
-				merge: "replace",
-				validate: "string",
-			},
-			last: {
-				merge: "replace",
-				validate: "string",
-			},
-		},
-	},
-});
+import { Directive, ConfigCommentParser } from "@eslint/plugin-kit";
 
-schema.validate({
-	name: {
-		first: "n",
-		last: "z",
-	},
-});
+class MySourceCode {
+	getDisableDirectives() {
+		const directives = [];
+		const problems = [];
+		const commentParser = new ConfigCommentParser();
+
+		// read in the inline config nodes to check each one
+		this.getInlineConfigNodes().forEach(comment => {
+			// Step 1: Parse the directive
+			const { label, value, justification } =
+				commentParser.parseDirective(comment.value);
+
+			// Step 2: Extract the directive value and create the `Directive` object
+			switch (label) {
+				case "eslint-disable":
+				case "eslint-enable":
+				case "eslint-disable-next-line":
+				case "eslint-disable-line": {
+					const directiveType = label.slice("eslint-".length);
+
+					directives.push(
+						new Directive({
+							type: directiveType,
+							node: comment,
+							value,
+							justification,
+						}),
+					);
+				}
+
+				// ignore any comments that don't begin with known labels
+			}
+		});
+
+		return {
+			directives,
+			problems,
+		};
+	}
+}
 ```
 
-### Remove Keys During Merge
+### `TextSourceCodeBase`
 
-If the merge strategy for a key returns `undefined`, then the key will not appear in the final object. For example:
+The `TextSourceCodeBase` class is intended to be a base class that has several of the common members found in `SourceCode` objects already implemented. Those members are:
+
+- `lines` - an array of text lines that is created automatically when the constructor is called.
+- `getLoc(node)` - gets the location of a node. Works for nodes that have the ESLint-style `loc` property and nodes that have the Unist-style [`position` property](https://github.com/syntax-tree/unist?tab=readme-ov-file#position). If you're using an AST with a different location format, you'll still need to implement this method yourself.
+- `getRange(node)` - gets the range of a node within the source text. Works for nodes that have the ESLint-style `range` property and nodes that have the Unist-style [`position` property](https://github.com/syntax-tree/unist?tab=readme-ov-file#position). If you're using an AST with a different range format, you'll still need to implement this method yourself.
+- `getText(nodeOrToken, charsBefore, charsAfter)` - gets the source text for the given node or token that has range information attached. Optionally, can return additional characters before and after the given node or token. As long as `getRange()` is properly implemented, this method will just work.
+- `getAncestors(node)` - returns the ancestry of the node. In order for this to work, you must implement the `getParent()` method yourself.
+
+Here's an example:
 
 ```js
-const schema = new ObjectSchema({
-	date: {
-		merge() {
-			return undefined;
-		},
-		validate(value) {
-			Date.parse(value); // throws an error when invalid
-		},
-	},
-});
+import { TextSourceCodeBase } from "@eslint/plugin-kit";
 
-const object1 = { date: "5/5/2005" };
-const object2 = { date: "6/6/2006" };
+export class MySourceCode extends TextSourceCodeBase {
+	#parents = new Map();
 
-const result = schema.merge(object1, object2);
+	constructor({ ast, text }) {
+		super({ ast, text });
+	}
 
-console.log("date" in result); // false
+	getParent(node) {
+		return this.#parents.get(node);
+	}
+
+	traverse() {
+		const steps = [];
+
+		for (const { node, parent, phase } of iterator(this.ast)) {
+			//save the parent information
+			this.#parent.set(node, parent);
+
+			steps.push(
+				new VisitNodeStep({
+					target: node,
+					phase: phase === "enter" ? 1 : 2,
+					args: [node, parent],
+				}),
+			);
+		}
+
+		return steps;
+	}
+}
 ```
 
-### Requiring Another Key Be Present
-
-If you'd like the presence of one key to require the presence of another key, you can use the `requires` property to specify an array of other properties that any key requires. For example:
-
-```js
-const schema = new ObjectSchema();
-
-const schema = new ObjectSchema({
-	date: {
-		merge() {
-			return undefined;
-		},
-		validate(value) {
-			Date.parse(value); // throws an error when invalid
-		},
-	},
-	time: {
-		requires: ["date"],
-		merge(first, second) {
-			return second;
-		},
-		validate(value) {
-			// ...
-		},
-	},
-});
-
-// throws error: Key "time" requires keys "date"
-schema.validate({
-	time: "13:45",
-});
-```
-
-In this example, even though `date` is an optional key, it is required to be present whenever `time` is present.
+In general, it's safe to collect the parent information during the `traverse()` method as `getParent()` and `getAncestor()` will only be called from rules once the AST has been traversed at least once.
 
 ## License
 
@@ -233,9 +262,9 @@ to get your logo on our READMEs and [website](https://eslint.org/sponsors).
 
 <h3>Platinum Sponsors</h3>
 <p><a href="https://automattic.com"><img src="https://images.opencollective.com/automattic/d0ef3e1/logo.png" alt="Automattic" height="128"></a> <a href="https://www.airbnb.com/"><img src="https://images.opencollective.com/airbnb/d327d66/logo.png" alt="Airbnb" height="128"></a></p><h3>Gold Sponsors</h3>
-<p><a href="https://qlty.sh/"><img src="https://images.opencollective.com/qltysh/33d157d/logo.png" alt="Qlty Software" height="96"></a> <a href="https://trunk.io/"><img src="https://images.opencollective.com/trunkio/fb92d60/avatar.png" alt="trunk.io" height="96"></a></p><h3>Silver Sponsors</h3>
-<p><a href="https://www.serptriumph.com/"><img src="https://images.opencollective.com/serp-triumph5/fea3074/logo.png" alt="SERP Triumph" height="64"></a> <a href="https://www.jetbrains.com/"><img src="https://images.opencollective.com/jetbrains/fe76f99/logo.png" alt="JetBrains" height="64"></a> <a href="https://liftoff.io/"><img src="https://images.opencollective.com/liftoff/5c4fa84/logo.png" alt="Liftoff" height="64"></a> <a href="https://americanexpress.io"><img src="https://avatars.githubusercontent.com/u/3853301" alt="American Express" height="64"></a></p><h3>Bronze Sponsors</h3>
-<p><a href="https://cybozu.co.jp/"><img src="https://images.opencollective.com/cybozu/933e46d/logo.png" alt="Cybozu" height="32"></a> <a href="https://www.crosswordsolver.org/anagram-solver/"><img src="https://images.opencollective.com/anagram-solver/2666271/logo.png" alt="Anagram Solver" height="32"></a> <a href="https://icons8.com/"><img src="https://images.opencollective.com/icons8/7fa1641/logo.png" alt="Icons8" height="32"></a> <a href="https://discord.com"><img src="https://images.opencollective.com/discordapp/f9645d9/logo.png" alt="Discord" height="32"></a> <a href="https://www.gitbook.com"><img src="https://avatars.githubusercontent.com/u/7111340" alt="GitBook" height="32"></a> <a href="https://nolebase.ayaka.io"><img src="https://avatars.githubusercontent.com/u/11081491" alt="Neko" height="32"></a> <a href="https://nx.dev"><img src="https://avatars.githubusercontent.com/u/23692104" alt="Nx" height="32"></a> <a href="https://opensource.mercedes-benz.com/"><img src="https://avatars.githubusercontent.com/u/34240465" alt="Mercedes-Benz Group" height="32"></a> <a href="https://herocoders.com"><img src="https://avatars.githubusercontent.com/u/37549774" alt="HeroCoders" height="32"></a></p>
+<p><a href="https://qlty.sh/"><img src="https://images.opencollective.com/qltysh/33d157d/logo.png" alt="Qlty Software" height="96"></a> <a href="https://trunk.io/"><img src="https://images.opencollective.com/trunkio/fb92d60/avatar.png" alt="trunk.io" height="96"></a> <a href="https://shopify.engineering/"><img src="https://avatars.githubusercontent.com/u/8085" alt="Shopify" height="96"></a></p><h3>Silver Sponsors</h3>
+<p><a href="https://vite.dev/"><img src="https://images.opencollective.com/vite/e6d15e1/logo.png" alt="Vite" height="64"></a> <a href="https://liftoff.io/"><img src="https://images.opencollective.com/liftoff/5c4fa84/logo.png" alt="Liftoff" height="64"></a> <a href="https://americanexpress.io"><img src="https://avatars.githubusercontent.com/u/3853301" alt="American Express" height="64"></a> <a href="https://stackblitz.com"><img src="https://avatars.githubusercontent.com/u/28635252" alt="StackBlitz" height="64"></a></p><h3>Bronze Sponsors</h3>
+<p><a href="https://cybozu.co.jp/"><img src="https://images.opencollective.com/cybozu/933e46d/logo.png" alt="Cybozu" height="32"></a> <a href="https://sentry.io"><img src="https://github.com/getsentry.png" alt="Sentry" height="32"></a> <a href="https://www.crosswordsolver.org/anagram-solver/"><img src="https://images.opencollective.com/anagram-solver/2666271/logo.png" alt="Anagram Solver" height="32"></a> <a href="https://icons8.com/"><img src="https://images.opencollective.com/icons8/7fa1641/logo.png" alt="Icons8" height="32"></a> <a href="https://discord.com"><img src="https://images.opencollective.com/discordapp/f9645d9/logo.png" alt="Discord" height="32"></a> <a href="https://www.gitbook.com"><img src="https://avatars.githubusercontent.com/u/7111340" alt="GitBook" height="32"></a> <a href="https://nx.dev"><img src="https://avatars.githubusercontent.com/u/23692104" alt="Nx" height="32"></a> <a href="https://opensource.mercedes-benz.com/"><img src="https://avatars.githubusercontent.com/u/34240465" alt="Mercedes-Benz Group" height="32"></a> <a href="https://herocoders.com"><img src="https://avatars.githubusercontent.com/u/37549774" alt="HeroCoders" height="32"></a> <a href="https://www.lambdatest.com"><img src="https://avatars.githubusercontent.com/u/171592363" alt="LambdaTest" height="32"></a></p>
 <h3>Technology Sponsors</h3>
 Technology sponsors allow us to use their products and services for free as part of a contribution to the open source ecosystem and our work.
 <p><a href="https://netlify.com"><img src="https://raw.githubusercontent.com/eslint/eslint.org/main/src/assets/images/techsponsors/netlify-icon.svg" alt="Netlify" height="32"></a> <a href="https://algolia.com"><img src="https://raw.githubusercontent.com/eslint/eslint.org/main/src/assets/images/techsponsors/algolia-icon.svg" alt="Algolia" height="32"></a> <a href="https://1password.com"><img src="https://raw.githubusercontent.com/eslint/eslint.org/main/src/assets/images/techsponsors/1password-icon.svg" alt="1Password" height="32"></a></p>
