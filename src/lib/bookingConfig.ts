@@ -3,9 +3,9 @@
 // ============================================
 
 // URLs de Webhooks de n8n (producción)
-export const N8N_WEBHOOK_URL = "https://n8n-n8n.npfusf.easypanel.host/webhook/disponibilidad";
-export const N8N_PRICES_WEBHOOK_URL = "https://n8n-n8n.npfusf.easypanel.host/webhook/precios-excel";
-export const N8N_BOOKING_WEBHOOK_URL = "https://n8n-n8n.npfusf.easypanel.host/webhook/reservar";
+export const N8N_WEBHOOK_URL = "https://n8n-n8n.1owldl.easypanel.host/webhook/b4920b99-1724-4169-8630-50b4b795911d";
+export const N8N_PRICES_WEBHOOK_URL = "https://n8n-n8n.1owldl.easypanel.host/webhook/854bd8ed-d900-4b55-a210-a08dac674651";
+export const N8N_BOOKING_WEBHOOK_URL = "https://n8n-n8n.1owldl.easypanel.host/webhook/a34d16d0-2cac-4847-845c-9b0a89f81f0c";
 
 // Tipos de datos
 export type RoomId = "atico" | "estudio" | "habitacion";
@@ -66,13 +66,59 @@ export interface BookingData {
   jornada: JornadaType | null;
   jornadaPrice: number | null; // Precio dinámico de la jornada
   comments?: string;
+  commentFields?: {
+    generales: string;
+    horaLlegada: string;
+    pagoManual: string;
+  };
   extras: {
     decoracion: DecorationType | null;
     decoracionDetails: DecorationDetails;
     pack: PackType | null;
     personasExtra: number;
   };
+  seguroCancelacion: boolean; // Seguro de cancelación Europ Assistance (5%)
   clientData: ClientData;
+}
+
+// Initial client data for forms
+export const initialClientData: ClientData = {
+  arrendadorNombre: "",
+  arrendadorDni: "",
+  acompananteNombre: "",
+  acompananteDni: "",
+  email: "",
+  telefono: "",
+};
+
+// Initial booking data for forms
+// Porcentaje del seguro de cancelación
+export const INSURANCE_PERCENTAGE = 0.05;
+
+export function initialBookingData(): BookingData {
+  return {
+    room: null,
+    date: null,
+    jornada: null,
+    jornadaPrice: null,
+    comments: "",
+    extras: {
+      decoracion: null,
+      decoracionDetails: {
+        iniciales: "",
+        numero: ""
+      },
+      pack: null,
+      personasExtra: 0,
+    },
+    seguroCancelacion: false,
+    clientData: initialClientData,
+    commentFields: {
+      generales: "",
+      horaLlegada: "",
+      pagoManual: ""
+    }
+  };
 }
 
 // Configuración de habitaciones con horarios
@@ -255,7 +301,7 @@ export function calculateTotalPrice(booking: BookingData): number {
       }
     }
   }
-
+  
   // Decoración
   if (booking.extras.decoracion) {
     const decoration = DECORATIONS.find(d => d.id === booking.extras.decoracion);
@@ -263,7 +309,7 @@ export function calculateTotalPrice(booking: BookingData): number {
       total += decoration.price;
     }
   }
-
+  
   // Pack
   if (booking.extras.pack) {
     const pack = PACKS.find(p => p.id === booking.extras.pack);
@@ -271,13 +317,50 @@ export function calculateTotalPrice(booking: BookingData): number {
       total += pack.price;
     }
   }
-
+  
   // Personas extra
   if (canAddPersonasExtra(booking.room, booking.jornada)) {
     total += booking.extras.personasExtra * PERSONA_EXTRA_PRICE;
   }
 
+  // Seguro de cancelación (5% del total de la estancia)
+  if (booking.seguroCancelacion) {
+    total += Math.round(total * INSURANCE_PERCENTAGE * 100) / 100;
+  }
+  
   return total;
+}
+
+// Función para calcular el precio del seguro (antes de añadirlo al total)
+export function calculateInsurancePrice(booking: BookingData): number {
+  let baseTotal = 0;
+
+  if (booking.room && booking.jornada) {
+    if (booking.jornadaPrice !== null && booking.jornadaPrice !== undefined) {
+      baseTotal += booking.jornadaPrice;
+    } else {
+      const jornada = getJornadaForRoom(booking.room, booking.jornada);
+      if (jornada) {
+        baseTotal += jornada.price;
+      }
+    }
+  }
+  
+  if (booking.extras.decoracion) {
+    const decoration = DECORATIONS.find(d => d.id === booking.extras.decoracion);
+    if (decoration) baseTotal += decoration.price;
+  }
+  
+  if (booking.extras.pack) {
+    const pack = PACKS.find(p => p.id === booking.extras.pack);
+    if (pack) baseTotal += pack.price;
+  }
+  
+  if (canAddPersonasExtra(booking.room, booking.jornada)) {
+    baseTotal += booking.extras.personasExtra * PERSONA_EXTRA_PRICE;
+  }
+
+  return Math.round(baseTotal * INSURANCE_PERCENTAGE * 100) / 100;
 }
 
 export function formatTimeSlot(timeSlot: TimeSlot): string {
@@ -456,49 +539,44 @@ export async function checkAvailability(date: Date, roomId: RoomId): Promise<Ava
   try {
     const room = getRoomById(roomId);
 
-    // Crear rango de fechas: mes completo para cachear si se quiere, o día actual
-    const startDateTime = formatDateLocal(date); // YYYY-MM-DD
+    // Crear rango de fechas: día seleccionado 00:00 hasta día siguiente 23:59
+    const startDateTime = formatDateTimeLocal(date, '00:00');
     const nextDay = new Date(date);
     nextDay.setDate(nextDay.getDate() + 1);
-    const endDateTime = formatDateLocal(nextDay); // YYYY-MM-DD
+    const endDateTime = formatDateTimeLocal(nextDay, '23:59');
 
-    // Petición GET al nuevo webhook
-    const url = new URL(N8N_WEBHOOK_URL);
-    url.searchParams.append('room', roomId);
-    url.searchParams.append('dateFrom', startDateTime);
-    url.searchParams.append('dateTo', endDateTime);
-
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
+    const response = await fetch(N8N_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'check_availability',
+        room_id: roomId,
+        room_name: room?.name || roomId,
+        date_start: startDateTime,
+        date_end: endDateTime,
+        date_formatted: date.toLocaleDateString('es-ES', {
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        })
+      })
     });
 
     if (!response.ok) {
-      console.error('Error en respuesta del webhook de disponibilidad:', response.status);
+      console.error('Error en respuesta del webhook:', response.status);
       return { events: [], availableJornadas: [] };
     }
 
     const data = await response.json();
 
-    // Parsear eventos del nuevo formato: { "room":"x", "busy": [{start:"...", end:"..."}] }
+    // Parsear eventos
     let events: CalendarEvent[] = [];
 
-    if (data && data.busy && Array.isArray(data.busy)) {
-      events = data.busy.map((b: any, index: number) => ({
-        id: `busy-${index}`,
-        start: { dateTime: b.start },
-        end: { dateTime: b.end }
-      }));
-    } else if (Array.isArray(data)) {
-      // Fallback por si devuelve array directo
-      const busyArr = data[0]?.busy || data;
-      if (Array.isArray(busyArr)) {
-        events = busyArr.map((b: any, index: number) => ({
-          id: `busy-${index}`,
-          start: { dateTime: b.start || b.start?.dateTime },
-          end: { dateTime: b.end || b.end?.dateTime }
-        })).filter(e => e.start.dateTime && e.end.dateTime);
-      }
+    if (Array.isArray(data)) {
+      events = data.filter(e =>
+        e && typeof e === 'object' && Object.keys(e).length > 0 && e.start && e.end
+      );
     }
 
     // Calcular jornadas disponibles
@@ -522,14 +600,14 @@ export async function fetchJornadaPrices(date: Date, roomId: RoomId): Promise<Jo
     const year = date.getFullYear();
     const dateFormatted = `${day}/${month}/${year}`;
 
-    // Petición GET al webhook de precios
-    const url = new URL(N8N_PRICES_WEBHOOK_URL);
-    url.searchParams.append('room', roomId);
-    url.searchParams.append('date', dateFormatted);
-
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
+    const response = await fetch(N8N_PRICES_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        room_name: room?.name || roomId,
+        room_id: roomId,
+        date: dateFormatted
+      })
     });
 
     if (!response.ok) {
@@ -552,17 +630,17 @@ export async function fetchJornadaPrices(date: Date, roomId: RoomId): Promise<Jo
 
     // Validar que tenga los campos necesarios y normalizar nombres
     if (
-      pricesResponse.jornada_de_dia !== undefined &&
-      pricesResponse.jornada_de_noche !== undefined &&
-      pricesResponse.dia_entero_manana !== undefined &&
-      pricesResponse.dia_entero_noche !== undefined
+      typeof pricesResponse.jornada_de_dia === 'number' &&
+      typeof pricesResponse.jornada_de_noche === 'number' &&
+      typeof pricesResponse.dia_entero_manana === 'number' &&
+      typeof pricesResponse.dia_entero_noche === 'number'
     ) {
-      // Convertir a número por si vienen como texto desde Google Sheets ('150' -> 150)
+      // Mapear nombres del webhook a nombres internos
       return {
-        dia: Number(pricesResponse.jornada_de_dia) || 0,
-        noche: Number(pricesResponse.jornada_de_noche) || 0,
-        dia_entero_manana: Number(pricesResponse.dia_entero_manana) || 0,
-        dia_entero_noche: Number(pricesResponse.dia_entero_noche) || 0
+        dia: pricesResponse.jornada_de_dia,
+        noche: pricesResponse.jornada_de_noche,
+        dia_entero_manana: pricesResponse.dia_entero_manana,
+        dia_entero_noche: pricesResponse.dia_entero_noche
       };
     }
 
@@ -665,6 +743,13 @@ export async function createBooking(booking: BookingData): Promise<{ success: bo
     let contractUrl: string | undefined;
     if (Array.isArray(data) && data[0]?.submitters?.[0]?.embed_src) {
       contractUrl = data[0].submitters[0].embed_src;
+    }
+
+    if (!contractUrl) {
+      return {
+        success: false,
+        message: 'El sistema no ha podido generar el enlace del contrato. Por favor, contacta con nosotros para completar la reserva manualmente.'
+      };
     }
 
     return {
